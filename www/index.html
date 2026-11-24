@@ -378,6 +378,10 @@ body{font-family:var(--ff,"Exo 2","Segoe UI",system-ui,-apple-system,sans-serif)
 #mini.xb .bar{border-radius:3px;overflow:hidden;background:rgba(0,0,0,.4)}
 #mini.xb .bar i{background:linear-gradient(#fff,var(--bc,#9f0))}
 #mini.bi{background:linear-gradient(rgba(0,0,0,.35),rgba(0,0,0,.55)),var(--bimg) center/cover;color:#fff}
+
+/* Optimizacion Android S24 */
+.card,.br,#player,#sheet,#srchv{will-change:transform,opacity;transform:translateZ(0)}
+#sheet{backdrop-filter:blur(6px) brightness(.55)!important;-webkit-backdrop-filter:blur(6px) brightness(.55)!important}
 </style>
 </head>
 <body>
@@ -925,6 +929,185 @@ FONTS.forEach(([k,n,css])=>{const b=document.createElement('button');b.className
 const _r4=$('rall').onclick;$('rall').onclick=async()=>{_r4();setFont('def',false);try{localStorage.removeItem('font')}catch(e){}setDeco(null);try{await idbDel('deco')}catch(e){}};
 try{setFont(localStorage.getItem('font')||'def',false)}catch(e){setFont('def',false)}
 render();
+
+/* ---- MOTOR PERSISTENTE BAD BEND (INDEXEDDB + ANDROID) ---- */
+(function(){
+  let libDbPromise = null;
+  function getLibDB(){
+    if(!libDbPromise) libDbPromise = new Promise((res, rej)=>{
+      const r = indexedDB.open("BadBendDB", 1);
+      r.onupgradeneeded = e => {
+        const db = e.target.result;
+        if(!db.objectStoreNames.contains("tracks")) db.createObjectStore("tracks", {keyPath: "key"});
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return libDbPromise;
+  }
+
+  async function dbSaveTrack(t){
+    try {
+      const db = await getLibDB();
+      const tx = db.transaction("tracks", "readwrite");
+      tx.objectStore("tracks").put({
+        key: t.key,
+        name: t.name,
+        artist: t.artist || "",
+        liked: !!t.liked,
+        hue: t.hue,
+        file: t.file,
+        coverBlob: t._coverBlob || null,
+        pk: t._pk ? Array.from(t._pk) : null,
+        lastModified: t.file ? t.file.lastModified : Date.now(),
+        addedAt: t.addedAt || Date.now()
+      });
+    } catch(e){}
+  }
+
+  async function dbDeleteTrack(key){
+    try {
+      const db = await getLibDB();
+      const tx = db.transaction("tracks", "readwrite");
+      tx.objectStore("tracks").delete(key);
+    } catch(e){}
+  }
+
+  async function dbLoadAll(){
+    try {
+      const db = await getLibDB();
+      return await new Promise((res, rej)=>{
+        const q = db.transaction("tracks", "readonly").objectStore("tracks").getAll();
+        q.onsuccess = () => res(q.result || []);
+        q.onerror = () => rej(q.error);
+      });
+    } catch(e){ return []; }
+  }
+
+  // Sobrescribir thumb para guardar también el Blob de la carátula
+  const _origThumb = thumb;
+  thumb = function(u){
+    return new Promise(res=>{
+      const im = new Image();
+      im.onload = ()=>{
+        try {
+          const S=300, c=document.createElement("canvas");
+          c.width=c.height=S;
+          const m=Math.min(im.width,im.height);
+          c.getContext("2d").drawImage(im,(im.width-m)/2,(im.height-m)/2,m,m,0,0,S,S);
+          c.toBlob(b=>{
+            URL.revokeObjectURL(u);
+            if(b){
+              const objUrl = URL.createObjectURL(b);
+              objUrl._blobRef = b;
+              res(objUrl);
+            } else res(null);
+          },"image/jpeg",.8);
+        } catch(e){ res(u); }
+      };
+      im.onerror = ()=>res(null);
+      im.src = u;
+    });
+  };
+
+  // Interceptar addFiles para guardar cada canción añadida en la base de datos
+  const _origAddFiles = addFiles;
+  addFiles = function(list){
+    const prevLen = tracks.length;
+    _origAddFiles(list);
+    for(let i = prevLen; i < tracks.length; i++){
+      tracks[i].addedAt = Date.now() + i;
+      dbSaveTrack(tracks[i]);
+    }
+  };
+
+  // Interceptar lectura de tags para guardar metadatos y carátula en DB
+  const _origUpdateCard = updateCard;
+  updateCard = function(t){
+    _origUpdateCard(t);
+    if(t.cover && t.cover._blobRef && !t._coverBlob){
+      t._coverBlob = t.cover._blobRef;
+    }
+    dbSaveTrack(t);
+  };
+
+  // Interceptar Like para guardarlo permanentemente
+  const _origLike = like;
+  like = function(){
+    _origLike();
+    if(tracks[cur]) dbSaveTrack(tracks[cur]);
+  };
+
+  // Interceptar Quitar canción para borrarla de DB
+  const _origRm = $("rm").onclick;
+  $("rm").onclick = function(){
+    const toDel = tracks[cur] ? tracks[cur].key : null;
+    _origRm();
+    if(toDel) dbDeleteTrack(toDel);
+  };
+
+  // Interceptar cálculo de onda para cachear los picos en DB y evitar tirones futuros
+  const _origDecodePeaks = decodePeaks;
+  decodePeaks = async function(t){
+    const pk = await _origDecodePeaks(t);
+    if(pk){ t._pk = pk; dbSaveTrack(t); }
+    return pk;
+  };
+
+  // MediaSession para pantalla de bloqueo en Galaxy S24
+  const _origSync = sync;
+  sync = function(){
+    _origSync();
+    const t = tracks[cur];
+    if(t && "mediaSession" in navigator){
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: t.name,
+          artist: t.artist || "Bad Bënd",
+          album: "Bad Bënd",
+          artwork: t.cover ? [{src: t.cover, sizes: "300x300", type: "image/jpeg"}] : []
+        });
+        navigator.mediaSession.setActionHandler("play", ()=>audio.play());
+        navigator.mediaSession.setActionHandler("pause", ()=>audio.pause());
+      } catch(e){}
+    }
+  };
+
+  // Cargar biblioteca guardada al abrir la app
+  dbLoadAll().then(saved => {
+    if(!saved || !saved.length) return;
+    saved.sort((a,b)=>(a.addedAt||0)-(b.addedAt||0));
+    saved.forEach(item => {
+      if(!item.file) return;
+      const t = {
+        key: item.key,
+        file: item.file,
+        name: item.name,
+        artist: item.artist,
+        liked: !!item.liked,
+        hue: item.hue || 120,
+        url: URL.createObjectURL(item.file),
+        tg: 1,
+        addedAt: item.addedAt
+      };
+      if(item.coverBlob){
+        t._coverBlob = item.coverBlob;
+        t.cover = URL.createObjectURL(item.coverBlob);
+      }
+      if(item.pk){
+        t._pk = new Float32Array(item.pk);
+      }
+      tracks.push(t);
+    });
+    if(tracks.length){
+      cur = 0;
+      audio.src = tracks[0].url;
+      sync();
+      render();
+    }
+  });
+})();
+
 </script>
 </body>
 </html>
