@@ -11,6 +11,7 @@ jobs:
       - name: Install dependencies & Generate Icons
         run: |
           npm install
+          npm install @capacitor/assets
           npx capacitor-assets generate --android
       - uses: actions/setup-java@v4
         with:
@@ -23,5 +24,5 @@ jobs:
           ./gradlew assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: MiReproductor-APK
+          name: BadBend-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
