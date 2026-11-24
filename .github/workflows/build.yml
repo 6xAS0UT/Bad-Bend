@@ -8,11 +8,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Install dependencies & Generate Icons
+      - name: Install dependencies, Icons & Sync
         run: |
           npm install
           npm install @capacitor/assets
           npx capacitor-assets generate --android
+          npx cap sync android
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
